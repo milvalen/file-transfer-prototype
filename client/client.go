@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"net"
+	"os"
 )
 
 func main() {
@@ -14,10 +16,23 @@ func main() {
 		return
 	}
 
-	fmt.Println("Connected to server")
+	defer func(conn net.Conn) {
+		err := conn.Close()
+		if err != nil {
+			fmt.Println("Error closing connection:", err)
+		}
+	}(conn)
 
-	err = conn.Close()
+	fmt.Println("Connected to server")
+	fmt.Print("Enter message: ")
+
+	message, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+
+	_, err = fmt.Fprint(conn, message)
 	if err != nil {
 		return
 	}
+
+	reply, _ := bufio.NewReader(conn).ReadString('\n')
+	fmt.Println("Server reply: ", reply)
 }

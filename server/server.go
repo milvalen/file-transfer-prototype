@@ -9,7 +9,10 @@ import (
 	"path/filepath"
 )
 
-const serverFilesDir = "server_files"
+const (
+	serverFilesDir = "server_files"
+	blockSize      = 1048576 // 1 MB
+)
 
 func main() {
 	fmt.Print("Server starting...")
@@ -70,10 +73,26 @@ func handleFileTransfer(conn net.Conn) {
 		}
 	}(file)
 
-	_, err = io.Copy(file, reader)
-	if err != nil {
-		fmt.Println("Error saving file:", err)
-		return
+	buffer := make([]byte, blockSize)
+
+	for {
+		bytesRead, e := reader.Read(buffer)
+		if e != nil {
+			if e == io.EOF {
+				break
+			}
+
+			fmt.Println("Error reading chunk:", e)
+			return
+		}
+
+		_, err = file.Write(buffer[:bytesRead])
+		if err != nil {
+			fmt.Println("Error writing chunk to file:", err)
+			return
+		}
+
+		fmt.Println("Received chunk of size:", bytesRead)
 	}
 
 	fmt.Println("File received and saved as:", filename)

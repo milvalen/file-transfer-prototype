@@ -8,7 +8,10 @@ import (
 	"path/filepath"
 )
 
-const clientFilesDir = "client_files"
+const (
+	clientFilesDir = "client_files"
+	blockSize      = 1048576 // 1 MB
+)
 
 func main() {
 	fmt.Println("Client starting...")
@@ -21,12 +24,12 @@ func main() {
 
 	for _, file := range files {
 		if !file.IsDir() {
-			sendFile(file.Name())
+			sendFileInChuncks(file.Name())
 		}
 	}
 }
 
-func sendFile(filename string) {
+func sendFileInChuncks(filename string) {
 	conn, err := net.Dial("tcp", "localhost:8080")
 	if err != nil {
 		fmt.Println("Error connecting to server:", err)
@@ -58,10 +61,26 @@ func sendFile(filename string) {
 		fmt.Println("Error sending filename:", err)
 	}
 
-	_, err = io.Copy(conn, file)
-	if err != nil {
-		fmt.Println("Error sending file:", err)
-		return
+	buffer := make([]byte, blockSize)
+
+	for {
+		bytesRead, e := file.Read(buffer)
+		if e != nil && e != io.EOF {
+			fmt.Println("Error reading file:", e)
+			return
+		}
+
+		if bytesRead == 0 {
+			break
+		}
+
+		_, err = conn.Write(buffer[:bytesRead])
+		if err != nil {
+			fmt.Println("Error sending chunk:", err)
+			return
+		}
+
+		fmt.Println("Sent chunk of size:", bytesRead)
 	}
 
 	fmt.Println("File sent successfully:", filename)

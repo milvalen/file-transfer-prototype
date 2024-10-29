@@ -1,20 +1,29 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 const (
+	checkpointDir  = "client_checkpoints"
 	clientFilesDir = "client_files"
 	blockSize      = 1048576 // 1 MB
 )
 
 func main() {
 	fmt.Println("Client starting...")
+
+	if _, err := os.Stat(checkpointDir); os.IsNotExist(err) {
+		if os.Mkdir(checkpointDir, os.ModePerm) != nil {
+			return
+		}
+	}
 
 	files, err := os.ReadDir(clientFilesDir)
 	if err != nil {
@@ -24,12 +33,14 @@ func main() {
 
 	for _, file := range files {
 		if !file.IsDir() {
-			sendFileInChuncks(file.Name())
+			sendFileInChunks(file.Name())
 		}
 	}
+
+	fmt.Println("All files have been sent.")
 }
 
-func sendFileInChuncks(filename string) {
+func sendFileInChunks(filename string) {
 	conn, err := net.Dial("tcp", "localhost:8080")
 	if err != nil {
 		fmt.Println("Error connecting to server:", err)
@@ -42,7 +53,22 @@ func sendFileInChuncks(filename string) {
 		}
 	}(conn)
 
-	fmt.Println("Connected to server to send", filename)
+	fmt.Println("Connected to server to send:", filename)
+
+	checkpointPath := filepath.Join(checkpointDir, filename+".chk")
+	startChunk := 0
+
+	if chkFile, e := os.Open(checkpointPath); e == nil {
+		scanner := bufio.NewScanner(chkFile)
+
+		if scanner.Scan() {
+			startChunk, _ = strconv.Atoi(scanner.Text())
+		}
+
+		if chkFile.Close() != nil {
+			return
+		}
+	}
 
 	file, err := os.Open(filepath.Join(clientFilesDir, filename))
 	if err != nil {
@@ -56,12 +82,18 @@ func sendFileInChuncks(filename string) {
 		}
 	}(file)
 
-	_, err = fmt.Fprintln(conn, filename)
+	_, err = fmt.Fprintf(conn, "%s:%d\n", filename, startChunk)
 	if err != nil {
-		fmt.Println("Error sending filename:", err)
+		fmt.Println("Error sending filename and checkpoint:", err)
+	}
+
+	_, err = file.Seek(int64(startChunk*blockSize), io.SeekStart)
+	if err != nil {
+		return
 	}
 
 	buffer := make([]byte, blockSize)
+	chunkIndex := startChunk
 
 	for {
 		bytesRead, e := file.Read(buffer)
@@ -80,8 +112,30 @@ func sendFileInChuncks(filename string) {
 			return
 		}
 
-		fmt.Println("Sent chunk of size:", bytesRead)
+		chunkIndex++
+		updateCheckpoint(checkpointPath, chunkIndex)
+
+		fmt.Println("Sent chuck:", chunkIndex)
 	}
 
 	fmt.Println("File sent successfully:", filename)
+}
+
+func updateCheckpoint(path string, chunkIndex int) {
+	chkFile, err := os.Create(path)
+	if err != nil {
+		fmt.Println("Error creating checkpoint file:", err)
+		return
+	}
+
+	defer func(chkFile *os.File) {
+		if chkFile.Close() != nil {
+			fmt.Println("Error closing checkpoint file:", err)
+		}
+	}(chkFile)
+
+	_, err = chkFile.WriteString(strconv.Itoa(chunkIndex))
+	if err != nil {
+		fmt.Println("Error writing to checkpoint file:", err)
+	}
 }

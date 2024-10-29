@@ -7,15 +7,24 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 const (
+	checkpointDir  = "server_checkpoints"
 	serverFilesDir = "server_files"
 	blockSize      = 1048576 // 1 MB
 )
 
 func main() {
-	fmt.Print("Server starting...")
+	fmt.Println("Server starting...")
+
+	if _, err := os.Stat(checkpointDir); os.IsNotExist(err) {
+		if os.Mkdir(checkpointDir, os.ModePerm) != nil {
+			return
+		}
+	}
 
 	ln, err := net.Listen("tcp", ":8080")
 	if err != nil {
@@ -28,6 +37,8 @@ func main() {
 			fmt.Println("Error closing listener:", err)
 		}
 	}(ln)
+
+	fmt.Println("Server is listening on port 8080...")
 
 	for {
 		conn, e := ln.Accept()
@@ -52,18 +63,19 @@ func handleFileTransfer(conn net.Conn) {
 
 	reader := bufio.NewReader(conn)
 
-	filename, err := reader.ReadString('\n')
+	header, err := reader.ReadString('\n')
 	if err != nil {
-		fmt.Println("Error reading filename:", err)
+		fmt.Println("Error reading filename and checkpoint:", err)
 		return
 	}
 
-	filename = filename[:len(filename)-1]
-	filePath := filepath.Join(serverFilesDir, filename)
+	parts := strings.Split(strings.TrimSpace(header), ":")
+	filePath := filepath.Join(serverFilesDir, parts[0])
+	startChunk, _ := strconv.Atoi(parts[1])
 
-	file, err := os.Create(filePath)
+	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
-		fmt.Println("Error creating file:", err)
+		fmt.Println("Error opening file:", err)
 		return
 	}
 
@@ -73,7 +85,13 @@ func handleFileTransfer(conn net.Conn) {
 		}
 	}(file)
 
+	_, err = file.Seek(int64(startChunk*blockSize), io.SeekStart)
+	if err != nil {
+		return
+	}
+
 	buffer := make([]byte, blockSize)
+	chunkIndex := startChunk
 
 	for {
 		bytesRead, e := reader.Read(buffer)
@@ -92,8 +110,30 @@ func handleFileTransfer(conn net.Conn) {
 			return
 		}
 
-		fmt.Println("Received chunk of size:", bytesRead)
+		chunkIndex++
+		updateCheckpoint(filepath.Join(checkpointDir, parts[0]+".chk"), chunkIndex)
+
+		fmt.Println("Received chunk:", chunkIndex)
 	}
 
-	fmt.Println("File received and saved as:", filename)
+	fmt.Println("File received and saved as:", filePath)
+}
+
+func updateCheckpoint(path string, chunkIndex int) {
+	chkFile, err := os.Create(path)
+	if err != nil {
+		fmt.Println("Error creating checkpoint file:", err)
+		return
+	}
+
+	defer func(chkFile *os.File) {
+		if chkFile.Close() != nil {
+			fmt.Println("Error closing checkpoint file:", err)
+		}
+	}(chkFile)
+
+	_, err = chkFile.WriteString(strconv.Itoa(chunkIndex))
+	if err != nil {
+		fmt.Println("Error writing to checkpoint file:", err)
+	}
 }

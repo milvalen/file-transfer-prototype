@@ -3,8 +3,13 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net"
+	"os"
+	"path/filepath"
 )
+
+const serverFilesDir = "server_files"
 
 func main() {
 	fmt.Print("Server starting...")
@@ -16,26 +21,25 @@ func main() {
 	}
 
 	defer func(ln net.Listener) {
-		err := ln.Close()
-		if err != nil {
+		if ln.Close() != nil {
 			fmt.Println("Error closing listener:", err)
 		}
 	}(ln)
 
 	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			fmt.Println("Error accepting connection:", err)
+		conn, e := ln.Accept()
+		if e != nil {
+			fmt.Println("Error accepting connection:", e)
 			continue
 		}
 
 		fmt.Println("Client connected:", conn.RemoteAddr())
 
-		go handleConn(conn)
+		go handleFileTransfer(conn)
 	}
 }
 
-func handleConn(conn net.Conn) {
+func handleFileTransfer(conn net.Conn) {
 	defer func(conn net.Conn) {
 		err := conn.Close()
 		if err != nil {
@@ -43,16 +47,34 @@ func handleConn(conn net.Conn) {
 		}
 	}(conn)
 
-	message, err := bufio.NewReader(conn).ReadString('\n')
+	reader := bufio.NewReader(conn)
+
+	filename, err := reader.ReadString('\n')
 	if err != nil {
-		fmt.Println("Error reading from client:", err)
+		fmt.Println("Error reading filename:", err)
 		return
 	}
 
-	fmt.Println("Received message from client:", message)
+	filename = filename[:len(filename)-1]
+	filePath := filepath.Join(serverFilesDir, filename)
 
-	_, err = fmt.Fprintf(conn, "Message received")
+	file, err := os.Create(filePath)
 	if err != nil {
+		fmt.Println("Error creating file:", err)
 		return
 	}
+
+	defer func(file *os.File) {
+		if file.Close() != nil {
+			fmt.Println("Error closing file:", err)
+		}
+	}(file)
+
+	_, err = io.Copy(file, reader)
+	if err != nil {
+		fmt.Println("Error saving file:", err)
+		return
+	}
+
+	fmt.Println("File received and saved as:", filename)
 }

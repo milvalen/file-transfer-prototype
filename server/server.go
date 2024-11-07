@@ -71,7 +71,12 @@ func handleFileTransfer(conn net.Conn) {
 
 	parts := strings.Split(strings.TrimSpace(header), ":")
 	filePath := filepath.Join(serverFilesDir, parts[0])
-	startChunk, _ := strconv.Atoi(parts[1])
+
+	startChunk, err := strconv.Atoi(parts[1])
+	if err != nil {
+		fmt.Println("Error parsing chunk index:", err)
+		return
+	}
 
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
@@ -87,6 +92,7 @@ func handleFileTransfer(conn net.Conn) {
 
 	_, err = file.Seek(int64(startChunk*blockSize), io.SeekStart)
 	if err != nil {
+		fmt.Println("Error seeking in file:", err)
 		return
 	}
 

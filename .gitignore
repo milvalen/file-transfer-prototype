@@ -1,5 +1,1 @@
-client_checkpoints
-server_checkpoints
-server_files/*
-client_files/*
 .idea

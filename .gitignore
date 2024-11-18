@@ -1,5 +1,6 @@
-client_checkpoints
-server_checkpoints
-server_files/*
-client_files/*
+server/.DS_Store
+client/.DS_Store
+server/files
+client/files
+.DS_Store
 .idea

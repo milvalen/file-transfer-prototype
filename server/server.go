@@ -1,145 +1,138 @@
 package main
 
 import (
-	"bufio"
+	"hash/crc32"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 )
 
-const (
-	checkpointDir  = "server_checkpoints"
-	serverFilesDir = "server_files"
-	blockSize      = 1048576 // 1 MB
-)
-
-func main() {
-	fmt.Println("Server starting...")
-
-	if _, err := os.Stat(checkpointDir); os.IsNotExist(err) {
-		if os.Mkdir(checkpointDir, os.ModePerm) != nil {
-			return
-		}
-	}
-
-	ln, err := net.Listen("tcp", ":8080")
-	if err != nil {
-		fmt.Println("Error starting server:", err)
-		return
-	}
-
-	defer func(ln net.Listener) {
-		if ln.Close() != nil {
-			fmt.Println("Error closing listener:", err)
-		}
-	}(ln)
-
-	fmt.Println("Server is listening on port 8080...")
-
-	for {
-		conn, e := ln.Accept()
-		if e != nil {
-			fmt.Println("Error accepting connection:", e)
-			continue
-		}
-
-		fmt.Println("Client connected:", conn.RemoteAddr())
-
-		go handleFileTransfer(conn)
-	}
+type FileMetadata struct {
+	FileName string `json:"file_name"`
+	FileSize int64  `json:"file_size"`
+	FileCRC  string `json:"file_crc"`
 }
 
-func handleFileTransfer(conn net.Conn) {
-	defer func(conn net.Conn) {
-		err := conn.Close()
+func calculateCRC32(filePath string) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	hash := crc32.NewIEEE()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%08x", hash.Sum32()), nil
+}
+
+func handleConnection(conn net.Conn, saveDir string) {
+	defer conn.Close()
+
+	var metadata FileMetadata
+
+	// Получение метаданных
+	decoder := json.NewDecoder(conn)
+	if err := decoder.Decode(&metadata); err != nil {
+		fmt.Println("Ошибка при получении метаданных:", err)
+		return
+	}
+
+	filePath := filepath.Join(saveDir, metadata.FileName)
+	fmt.Printf("Получение файла: %s, размер: %d байт, CRC32: %s\n", metadata.FileName, metadata.FileSize, metadata.FileCRC)
+
+	// Existing file check
+	var currentSize int64
+	if stat, err := os.Stat(filePath); err == nil {
+		currentSize = stat.Size()
+	}
+
+	// TODO: refactor client response
+	if currentSize <= metadata.FileSize {
+		conn.Write([]byte("continue\n"))
+		conn.Write([]byte(strconv.FormatInt(currentSize, 10) + "\n"))
+	} else {
+		conn.Write([]byte("new\n"))
+		currentSize = 0
+	}
+
+	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Println("Ошибка открытия файла:", err)
+		return
+	}
+	defer file.Close()
+
+	received := currentSize
+	buffer := make([]byte, 1024*1024)
+        i := 0
+
+	for received < metadata.FileSize {
+                frames := []string{"|", "/", "-", "\\"}
+                i++
+		n, err := conn.Read(buffer)
 		if err != nil {
-			fmt.Println("Error closing connection:", err)
-		}
-	}(conn)
-
-	reader := bufio.NewReader(conn)
-
-	header, err := reader.ReadString('\n')
-	if err != nil {
-		fmt.Println("Error reading filename and checkpoint:", err)
-		return
-	}
-
-	parts := strings.Split(strings.TrimSpace(header), ":")
-	filePath := filepath.Join(serverFilesDir, parts[0])
-
-	startChunk, err := strconv.Atoi(parts[1])
-	if err != nil {
-		fmt.Println("Error parsing chunk index:", err)
-		return
-	}
-
-	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0666)
-	if err != nil {
-		fmt.Println("Error opening file:", err)
-		return
-	}
-
-	defer func(file *os.File) {
-		if file.Close() != nil {
-			fmt.Println("Error closing file:", err)
-		}
-	}(file)
-
-	_, err = file.Seek(int64(startChunk*blockSize), io.SeekStart)
-	if err != nil {
-		fmt.Println("Error seeking in file:", err)
-		return
-	}
-
-	buffer := make([]byte, blockSize)
-	chunkIndex := startChunk
-
-	for {
-		bytesRead, e := reader.Read(buffer)
-		if e != nil {
-			if e == io.EOF {
+			if err == io.EOF {
 				break
 			}
-
-			fmt.Println("Error reading chunk:", e)
+			fmt.Println("Ошибка при получении данных:", err)
 			return
 		}
-
-		_, err = file.Write(buffer[:bytesRead])
+		_, err = file.Write(buffer[:n])
 		if err != nil {
-			fmt.Println("Error writing chunk to file:", err)
+			fmt.Println("Ошибка при записи данных:", err)
 			return
 		}
-
-		chunkIndex++
-		updateCheckpoint(filepath.Join(checkpointDir, parts[0]+".chk"), chunkIndex)
-
-		fmt.Println("Received chunk:", chunkIndex)
+		received += int64(n)
+		fmt.Printf("\rПринято: %d/%d байт %s", received, metadata.FileSize, frames[i%3])
 	}
+	fmt.Println()
 
-	fmt.Println("File received and saved as:", filePath)
-}
-
-func updateCheckpoint(path string, chunkIndex int) {
-	chkFile, err := os.Create(path)
+	calculatedCRC, err := calculateCRC32(filePath)
 	if err != nil {
-		fmt.Println("Error creating checkpoint file:", err)
+		fmt.Println("Ошибка при вычислении CRC32:", err)
 		return
 	}
 
-	defer func(chkFile *os.File) {
-		if chkFile.Close() != nil {
-			fmt.Println("Error closing checkpoint file:", err)
-		}
-	}(chkFile)
+	fmt.Printf("Ожидаемый CRC32: %s, полученный: %s\n", metadata.FileCRC, calculatedCRC)
+	if calculatedCRC == metadata.FileCRC {
+		conn.Write([]byte("CRC32_OK\n"))
+		fmt.Println("Файл успешно передан и проверен!")
+	} else {
+		conn.Write([]byte("CRC32_ERROR\n"))
+		fmt.Println("Ошибка проверки CRC32. Файл не соответствует!")
+	}
+}
 
-	_, err = chkFile.WriteString(strconv.Itoa(chunkIndex))
+func main() {
+	port := 8080
+	saveDir := "./files"
+
+	if err := os.MkdirAll(saveDir, 0755); err != nil {
+		fmt.Println("Ошибка при создании директории:", err)
+		return
+	}
+
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
-		fmt.Println("Error writing to checkpoint file:", err)
+		fmt.Println("Ошибка запуска сервера:", err)
+		return
+	}
+	defer listener.Close()
+
+	fmt.Printf("Сервер запущен и ожидает подключения на порту %d, файлы сохраняются в %s\n", port, saveDir)
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			fmt.Println("Ошибка подключения клиента:", err)
+			continue
+		}
+		go handleConnection(conn, saveDir)
 	}
 }

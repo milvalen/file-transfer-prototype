@@ -1,141 +1,128 @@
 package main
 
 import (
-	"bufio"
+	"hash/crc32"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 )
 
-const (
-	checkpointDir  = "client_checkpoints"
-	clientFilesDir = "client_files"
-	blockSize      = 1048576 // 1 MB
-)
-
-func main() {
-	fmt.Println("Client starting...")
-
-	if _, err := os.Stat(checkpointDir); os.IsNotExist(err) {
-		if os.Mkdir(checkpointDir, os.ModePerm) != nil {
-			return
-		}
-	}
-
-	files, err := os.ReadDir(clientFilesDir)
-	if err != nil {
-		fmt.Println("Error reading client files directory:", err)
-		return
-	}
-
-	for _, file := range files {
-		if !file.IsDir() {
-			sendFileInChunks(file.Name())
-		}
-	}
-
-	fmt.Println("All files have been sent.")
+type FileMetadata struct {
+	FileName string `json:"file_name"`
+	FileSize int64  `json:"file_size"`
+	FileCRC  string `json:"file_crc"`
 }
 
-func sendFileInChunks(filename string) {
-	conn, err := net.Dial("tcp", "localhost:8080")
+func calculateCRC32(filePath string) (string, error) {
+	file, err := os.Open(filePath)
 	if err != nil {
-		fmt.Println("Error connecting to server:", err)
-		return
+		return "", err
 	}
+	defer file.Close()
 
-	defer func(conn net.Conn) {
-		if conn.Close() != nil {
-			fmt.Println("Error closing connection:", err)
-		}
-	}(conn)
-
-	fmt.Println("Connected to server to send:", filename)
-
-	checkpointPath := filepath.Join(checkpointDir, filename+".chk")
-	startChunk := 0
-
-	if chkFile, e := os.Open(checkpointPath); e == nil {
-		scanner := bufio.NewScanner(chkFile)
-
-		if scanner.Scan() {
-			startChunk, _ = strconv.Atoi(scanner.Text())
-		}
-
-		if chkFile.Close() != nil {
-			return
-		}
+	hash := crc32.NewIEEE()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
 	}
+	return fmt.Sprintf("%08x", hash.Sum32()), nil
+}
 
-	file, err := os.Open(filepath.Join(clientFilesDir, filename))
+func sendFile(serverIP string, port int, filePath string) error {
+	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", serverIP, port))
 	if err != nil {
-		fmt.Println("Error opening file:", err)
-		return
+		return err
 	}
+	defer conn.Close()
 
-	defer func(file *os.File) {
-		if file.Close() != nil {
-			fmt.Println("Error closing file:", err)
-		}
-	}(file)
-
-	_, err = fmt.Fprintf(conn, "%s:%d\n", filename, startChunk)
+	fileInfo, err := os.Stat(filePath)
 	if err != nil {
-		fmt.Println("Error sending filename and checkpoint:", err)
+		return err
 	}
 
-	_, err = file.Seek(int64(startChunk*blockSize), io.SeekStart)
+	fileCRC, err := calculateCRC32(filePath)
 	if err != nil {
-		return
+		return err
 	}
 
-	buffer := make([]byte, blockSize)
-	chunkIndex := startChunk
+	metadata := FileMetadata{
+		FileName: filepath.Base(filePath),
+		FileSize: fileInfo.Size(),
+		FileCRC:  fileCRC,
+	}
+
+	// Metadata send
+	encoder := json.NewEncoder(conn)
+	if err := encoder.Encode(&metadata); err != nil {
+		return err
+	}
+
+	// TODO: debug server response
+	var response string
+	fmt.Fscanln(conn, &response)
+	var currentSize int64
+	if response == "continue" {
+		fmt.Fscanln(conn, &currentSize)
+		fmt.Printf("Продолжаем с позиции %d байт\n", currentSize)
+	} else {
+		currentSize = 0
+		fmt.Println("Начинаем новую передачу.")
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	file.Seek(currentSize, io.SeekStart)
+	buffer := make([]byte, 1024*1024)
+	sent := currentSize
+        i := 0
 
 	for {
-		bytesRead, e := file.Read(buffer)
-		if e != nil && e != io.EOF {
-			fmt.Println("Error reading file:", e)
-			return
-		}
-
-		if bytesRead == 0 {
-			break
-		}
-
-		_, err = conn.Write(buffer[:bytesRead])
+                frames := []string{"|", "/", "-", "\\"}
+                i++
+		n, err := file.Read(buffer)
 		if err != nil {
-			fmt.Println("Error sending chunk:", err)
-			return
+			if err == io.EOF {
+				break
+			}
+			return err
 		}
 
-		chunkIndex++
-		updateCheckpoint(checkpointPath, chunkIndex)
-
-		fmt.Println("Sent chuck:", chunkIndex)
+		_, err = conn.Write(buffer[:n])
+		if err != nil {
+			return err
+		}
+		sent += int64(n)
+		fmt.Printf("\rОтправлено: %d/%d байт %s", sent, metadata.FileSize, frames[i%3])
 	}
+	fmt.Println()
 
-	fmt.Println("File sent successfully:", filename)
+	fmt.Println("Ожидание проверки CRC32...")
+	fmt.Fscanln(conn, &response)
+	if response == "CRC32_OK" {
+		fmt.Println("Передача завершена успешно. CRC32 совпадает.")
+	} else {
+		fmt.Println("Ошибка: CRC32 не совпадает.")
+	}
+	return nil
 }
 
-func updateCheckpoint(path string, chunkIndex int) {
-	chkFile, err := os.Create(path)
-	if err != nil {
-		fmt.Println("Error creating checkpoint file:", err)
-		return
-	}
+func main() {
+	var serverIP string
+	var filePath string
 
-	defer func(chkFile *os.File) {
-		if chkFile.Close() != nil {
-			fmt.Println("Error closing checkpoint file:", err)
-		}
-	}(chkFile)
+	fmt.Print("Введите IP-адрес сервера: ")
+	fmt.Scanln(&serverIP)
 
-	_, err = chkFile.WriteString(strconv.Itoa(chunkIndex))
-	if err != nil {
-		fmt.Println("Error writing to checkpoint file:", err)
+	fmt.Print("Введите путь к файлу: ")
+	fmt.Scanln(&filePath)
+
+	if err := sendFile(serverIP, 8080, filePath); err != nil {
+		fmt.Println("Ошибка:", err)
 	}
 }
